@@ -25,7 +25,7 @@ const char* mqtt_topic = "home/meter/electric/image";
 #define PCLK_GPIO_NUM     22
 
 // Capture interval (milliseconds)
-const unsigned long captureInterval = 300000;  // 5 minutes (change as needed)
+const unsigned long captureInterval = 600000;  // 10 minutes (change as needed)
 // 60000 = 1 min, 300000 = 5 min, 600000 = 10 min, 1800000 = 30 min
 unsigned long lastCapture = 0;
 
@@ -120,12 +120,12 @@ void reconnectMQTT() {
 
 void captureAndSend() {
   Serial.println("\n>>> Capturing image...");
-  digitalWrite(LED_BUILTIN, HIGH);  // LED on during capture
+  digitalWrite(FLASH_GPIO, HIGH);  // LED on during capture
   
   camera_fb_t * fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("✗ Camera capture failed");
-    digitalWrite(LED_BUILTIN, LOW);
+    digitalWrite(FLASH_GPIO, LOW);
     return;
   }
   
@@ -146,7 +146,7 @@ void captureAndSend() {
   }
   
   esp_camera_fb_return(fb);
-  digitalWrite(LED_BUILTIN, LOW);  // LED off after capture
+  digitalWrite(FLASH_GPIO, LOW);  // LED off after capture
 }
 
 void loop() {
