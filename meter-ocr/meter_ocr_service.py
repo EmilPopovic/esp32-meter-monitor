@@ -117,7 +117,7 @@ def on_connect(client, userdata, flags, rc):
 def on_message(client, userdata, msg):
     """Callback when image received"""
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-    print(f"\n[{timestamp}] 📷 Image received ({len(msg.payload)} bytes)")
+    print(f"\n[{timestamp}] Image received ({len(msg.payload)} bytes)")
     
     # Extract reading
     reading = extract_meter_reading(msg.payload)
