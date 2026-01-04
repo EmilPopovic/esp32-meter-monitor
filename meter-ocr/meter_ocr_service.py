@@ -21,6 +21,8 @@ READING_TOPIC = IMAGE_TOPIC.replace('/image', '/reading')
 
 METER_NAME = os.getenv('METER_NAME', 'Electric Meter Reading')
 METER_ID = os.getenv('METER_ID', 'electric_meter_reading')
+METER_UNIT = os.getenv('METER_UNIT', 'kWh')
+DEVICE_CLASS = os.getenv('DEVICE_CLASS', 'energy')
 
 # Tesseract configuration for digits
 TESSERACT_CONFIG = '--psm 7 -c tessedit_char_whitelist=0123456789'
@@ -68,7 +70,7 @@ def extract_meter_reading(image_data):
                     print(f"  Skipping potentially incorrect reading")
                     return None
             
-            print(f"  ✓ Reading extracted: {reading} kWh")
+            print(f"  ✓ Reading extracted: {reading} {METER_UNIT}")
             last_reading = reading
             
             # Keep history for debugging
@@ -103,8 +105,8 @@ def on_connect(client, userdata, flags, rc):
             "name": METER_NAME,
             "unique_id": METER_ID,
             "state_topic": STATE_TOPIC,
-            "unit_of_measurement": "kWh",
-            "device_class": "energy",
+            "unit_of_measurement": METER_UNIT,
+            "device_class": DEVICE_CLASS,
             "state_class": "total_increasing",
             "icon": "mdi:counter"
         }
@@ -134,7 +136,7 @@ def on_message(client, userdata, msg):
         }
         client.publish(READING_TOPIC, json.dumps(detail))
         
-        print(f"  ✓ Published to HA: {reading} kWh")
+        print(f"  ✓ Published to HA: {reading} {METER_UNIT}")
     else:
         print(f"  ✗ No valid reading extracted")
 
@@ -144,6 +146,7 @@ def main():
     print(f"Meter OCR Service Starting - {METER_NAME}")
     print("=" * 60)
     print(f"MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
+    print(f"Unit: {METER_UNIT} (Class: {DEVICE_CLASS})")
     print(f"Image Topic: {IMAGE_TOPIC}")
     print(f"State Topic: {STATE_TOPIC}")
     print("=" * 60)

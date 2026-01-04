@@ -26,6 +26,8 @@ services:
       - CONFIG_TOPIC=homeassistant/sensor/electric_meter/config
       - METER_NAME=Electric Meter Reading
       - METER_ID=electric_meter_reading
+      - METER_UNIT=kWh
+      - DEVICE_CLASS=energy
     restart: unless-stopped
     networks:
       iot_net:
@@ -44,6 +46,8 @@ services:
       - CONFIG_TOPIC=homeassistant/sensor/gas_meter/config
       - METER_NAME=Gas Meter Reading
       - METER_ID=gas_meter_reading
+      - METER_UNIT=m³
+      - DEVICE_CLASS=gas
     restart: unless-stopped
     networks:
       iot_net:
