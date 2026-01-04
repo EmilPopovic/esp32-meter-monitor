@@ -1,0 +1,55 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: mosquitto
+    ports:
+      - "10:30:30:210:1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    restart: unless-stopped
+    networks:
+      iot_net:
+        ipv4_address: 10.30.30.210
+  
+  meter-ocr-electric:
+    build: ./meter-ocr
+    container_name: meter-ocr-electric
+    depends_on:
+      - mosquitto
+    environment:
+      - MQTT_BROKER=mosquitto
+      - MQTT_PORT=1883
+      - IMAGE_TOPIC=home/meter/electric/image
+      - STATE_TOPIC=homeassistant/sensor/electric_meter/STATE_TOPIC
+      - CONFIG_TOPIC=homeassistant/sensor/electric_meter/config
+      - METER_NAME=Electric Meter Reading
+      - METER_ID=electric_meter_reading
+    restart: unless-stopped
+    networks:
+      iot_net:
+        ipv4_address: 10.30.30.211
+
+  meter-ocr-gas:
+    build: ./meter-ocr
+    container_name: meter-ocr-gas
+    depends_on:
+      - mosquitto
+    environment:
+      - MQTT_BROKER=mosquitto
+      - MQTT_PORT=1883
+      - IMAGE_TOPIC=home/meter/gas/image
+      - STATE_TOPIC=homeassistant/sensor/gas_meter/state
+      - CONFIG_TOPIC=homeassistant/sensor/gas_meter/config
+      - METER_NAME=Gas Meter Reading
+      - METER_ID=gas_meter_reading
+    restart: unless-stopped
+    networks:
+      iot_net:
+        ipv4_address: 10.30.30.212
+
+networks:
+  iot_net:
+    external: true
+    name: homeassistant_iot_net
