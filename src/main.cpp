@@ -5,7 +5,6 @@
 
 const int mqtt_port = 1883;
 const char* mqtt_topic = "home/meter/electric/image";
-const char* device_name = "Electric Meter";
 
 // Camera pins for AI-Thinker ESP32-CAM
 #define PWDN_GPIO_NUM     32
@@ -32,6 +31,7 @@ unsigned long lastCapture = 0;
 
 // Built-in LED for status
 #define LED_BUILTIN 33
+#define FLASH_GPIO 4
 
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
@@ -39,11 +39,9 @@ PubSubClient mqtt(espClient);
 void setup() {
   Serial.begin(115200);
   Serial.println("\n\n=================================");
-  Serial.print("ESP32-CAM Meter Reader: ");
-  Serial.println(device_name);
+  Serial.println("ESP32-CAM Meter Reader");
   Serial.println("=================================");
-  
-  // Setup LED
+
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
   
@@ -63,8 +61,8 @@ void setup() {
   config.pin_pclk = PCLK_GPIO_NUM;
   config.pin_vsync = VSYNC_GPIO_NUM;
   config.pin_href = HREF_GPIO_NUM;
-  config.pin_sscb_sda = SIOD_GPIO_NUM;
-  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
@@ -96,6 +94,12 @@ void setup() {
   // Setup MQTT
   mqtt.setServer(mqtt_server, mqtt_port);
   mqtt.setBufferSize(32768);  // Increase buffer for images
+
+  // Flash when ready
+  pinMode(FLASH_GPIO, OUTPUT);
+  digitalWrite(FLASH_GPIO, HIGH);
+  delay(1);
+  digitalWrite(FLASH_GPIO, LOW);
 }
 
 void reconnectMQTT() {
