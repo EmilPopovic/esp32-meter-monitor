@@ -33,6 +33,12 @@ unsigned long lastCapture = 0;
 #define LED_BUILTIN 33
 #define FLASH_GPIO 4
 
+// Flash brightness: 0=off, 255=full. Start low and increase if too dark.
+// Camera uses LEDC channel 0 + timer 0, so use channel 1 + timer 1 here.
+#define FLASH_DUTY       50   // ~20% - tune this (0-255)
+#define FLASH_LEDC_CH    1
+#define FLASH_LEDC_TIMER LEDC_TIMER_1
+
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
@@ -95,15 +101,15 @@ void setup() {
   mqtt.setServer(mqtt_server, mqtt_port);
   mqtt.setBufferSize(32768);  // Increase buffer for images
 
-  // Flash when ready
-  pinMode(FLASH_GPIO, OUTPUT);
-  digitalWrite(FLASH_GPIO, HIGH);
-  delay(1);
-  digitalWrite(FLASH_GPIO, LOW);
+  // Set up flash as PWM so brightness can be dialled back
+  ledcSetup(FLASH_LEDC_CH, 1000, 8);       // 1 kHz, 8-bit (0-255)
+  ledcAttachPin(FLASH_GPIO, FLASH_LEDC_CH);
 
-  // Bias auto-exposure toward brighter images (range -2 to +2)
-  sensor_t* s = esp_camera_sensor_get();
-  s->set_ae_level(s, 2);
+  // Flash when ready (full brightness for 1 ms just as a status blink)
+  ledcWrite(FLASH_LEDC_CH, 255);
+  delay(1);
+  ledcWrite(FLASH_LEDC_CH, 0);
+
 }
 
 void reconnectMQTT() {
@@ -124,7 +130,7 @@ void reconnectMQTT() {
 
 void captureAndSend() {
   Serial.println("\n>>> Capturing image...");
-  digitalWrite(FLASH_GPIO, HIGH);
+  ledcWrite(FLASH_LEDC_CH, FLASH_DUTY);
 
   // The camera buffers the last completed frame, which was captured in the dark.
   // Discard it and wait for AE to settle on the flash-lit scene.
@@ -135,7 +141,7 @@ void captureAndSend() {
   camera_fb_t * fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("✗ Camera capture failed");
-    digitalWrite(FLASH_GPIO, LOW);
+    ledcWrite(FLASH_LEDC_CH, 0);
     return;
   }
   
@@ -156,7 +162,7 @@ void captureAndSend() {
   }
   
   esp_camera_fb_return(fb);
-  digitalWrite(FLASH_GPIO, LOW);  // LED off after capture
+  ledcWrite(FLASH_LEDC_CH, 0);
 }
 
 void loop() {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import paho.mqtt.client as mqtt
 import pytesseract
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFilter
 import io
 import re
 import json
@@ -27,7 +27,8 @@ METER_UNIT = os.getenv('METER_UNIT', 'kWh')
 DEVICE_CLASS = os.getenv('DEVICE_CLASS', 'energy')
 
 # Tesseract configuration for digits
-TESSERACT_CONFIG = '--psm 7 -c tessedit_char_whitelist=0123456789'
+# psm 6 = uniform block of text (more forgiving than psm 7 when there's noise)
+TESSERACT_CONFIG = '--psm 6 -c tessedit_char_whitelist=0123456789'
 
 last_reading = None
 reading_history = []
@@ -94,6 +95,9 @@ def extract_meter_reading(image_data):
 
         # Normalize brightness/contrast regardless of how dark the image is
         image = ImageOps.autocontrast(image, cutoff=2)
+
+        # Sharpen to help with camera blur
+        image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
 
         # Save processed image for debugging
         buf = io.BytesIO()
