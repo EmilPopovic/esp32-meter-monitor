@@ -35,7 +35,7 @@ unsigned long lastCapture = 0;
 
 // Flash brightness: 0=off, 255=full. Start low and increase if too dark.
 // Camera uses LEDC channel 0 + timer 0, so use channel 1 + timer 1 here.
-#define FLASH_DUTY       50   // ~20% - tune this (0-255)
+#define FLASH_DUTY       255  // 100% — paper diffuser handles the hotspot
 #define FLASH_LEDC_CH    1
 #define FLASH_LEDC_TIMER LEDC_TIMER_1
 

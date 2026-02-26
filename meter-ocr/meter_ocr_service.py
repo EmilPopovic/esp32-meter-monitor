@@ -27,8 +27,7 @@ METER_UNIT = os.getenv('METER_UNIT', 'kWh')
 DEVICE_CLASS = os.getenv('DEVICE_CLASS', 'energy')
 
 # Tesseract configuration for digits
-# psm 6 = uniform block of text (more forgiving than psm 7 when there's noise)
-TESSERACT_CONFIG = '--psm 6 -c tessedit_char_whitelist=0123456789'
+TESSERACT_CONFIG = '--psm 7 -c tessedit_char_whitelist=0123456789'
 
 last_reading = None
 reading_history = []
@@ -96,7 +95,9 @@ def extract_meter_reading(image_data):
         # Normalize brightness/contrast regardless of how dark the image is
         image = ImageOps.autocontrast(image, cutoff=2)
 
-        # Sharpen to help with camera blur
+        # Scale up before OCR — Tesseract accuracy drops sharply on small text.
+        # Sharpen after scaling so edges are crisp at the enlarged size.
+        image = image.resize((image.width * 3, image.height * 3), Image.LANCZOS)
         image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
 
         # Save processed image for debugging
