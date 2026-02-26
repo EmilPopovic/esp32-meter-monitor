@@ -7,6 +7,8 @@ import re
 import json
 import time
 import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # Configuration from environment variables
 MQTT_BROKER = os.getenv('MQTT_BROKER', 'localhost')
@@ -29,20 +31,76 @@ TESSERACT_CONFIG = '--psm 7 -c tessedit_char_whitelist=0123456789'
 
 last_reading = None
 reading_history = []
+last_image_raw = None
+last_image_processed = None
+
+HTTP_PORT = int(os.getenv('HTTP_PORT', 8080))
+
+class ImageHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/image/raw':
+            self._serve_image(last_image_raw)
+        elif self.path in ('/image', '/image/processed'):
+            self._serve_image(last_image_processed)
+        elif self.path == '/':
+            self._serve_status()
+        else:
+            self.send_error(404)
+
+    def _serve_image(self, img_bytes):
+        if img_bytes is None:
+            self.send_response(503)
+            self.end_headers()
+            self.wfile.write(b'No image received yet')
+            return
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/jpeg')
+        self.send_header('Content-Length', str(len(img_bytes)))
+        self.end_headers()
+        self.wfile.write(img_bytes)
+
+    def _serve_status(self):
+        body = f"""<html><body>
+<h2>{METER_NAME}</h2>
+<p>Last reading: {last_reading} {METER_UNIT if last_reading else 'N/A'}</p>
+<p><a href="/image/raw">Raw image</a> &nbsp; <a href="/image/processed">Processed image (what Tesseract sees)</a></p>
+</body></html>""".encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass  # suppress access logs
+
+def start_http_server():
+    server = HTTPServer(('0.0.0.0', HTTP_PORT), ImageHandler)
+    print(f"✓ Image viewer running on port {HTTP_PORT}")
+    server.serve_forever()
 
 def extract_meter_reading(image_data):
     """Extract 7-digit meter reading from image"""
+    global last_image_raw, last_image_processed
     try:
+        # Save raw image for debugging
+        last_image_raw = image_data
+
         # Load image
         image = Image.open(io.BytesIO(image_data))
-        
+
         # Convert to grayscale
         image = image.convert('L')
-        
+
         # Enhance contrast for better OCR
         enhancer = ImageEnhance.Contrast(image)
         image = enhancer.enhance(2.0)
-        
+
+        # Save processed image for debugging
+        buf = io.BytesIO()
+        image.save(buf, format='JPEG')
+        last_image_processed = buf.getvalue()
+
         # Perform OCR
         text = pytesseract.image_to_string(image, config=TESSERACT_CONFIG)
         
@@ -151,6 +209,10 @@ def main():
     print(f"State Topic: {STATE_TOPIC}")
     print("=" * 60)
     
+    # Start HTTP image viewer
+    t = threading.Thread(target=start_http_server, daemon=True)
+    t.start()
+
     # Create MQTT client
     client = mqtt.Client()
     client.on_connect = on_connect

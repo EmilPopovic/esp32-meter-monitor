@@ -18,6 +18,8 @@ services:
     container_name: meter-ocr-electric
     depends_on:
       - mosquitto
+    ports:
+      - "10.30.30.211:8080:8080"
     environment:
       - MQTT_BROKER=mosquitto
       - MQTT_PORT=1883
@@ -38,6 +40,8 @@ services:
     container_name: meter-ocr-gas
     depends_on:
       - mosquitto
+    ports:
+      - "10.30.30.212:8080:8080"
     environment:
       - MQTT_BROKER=mosquitto
       - MQTT_PORT=1883

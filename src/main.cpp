@@ -4,7 +4,7 @@
 #include "credentials.h"
 
 const int mqtt_port = 1883;
-const char* mqtt_topic = "home/meter/electric/image";
+const char* mqtt_topic = "home/meter/gas/image";
 
 // Camera pins for AI-Thinker ESP32-CAM
 #define PWDN_GPIO_NUM     32
@@ -25,7 +25,7 @@ const char* mqtt_topic = "home/meter/electric/image";
 #define PCLK_GPIO_NUM     22
 
 // Capture interval (milliseconds)
-const unsigned long captureInterval = 600000;  // 10 minutes (change as needed)
+const unsigned long captureInterval = 6000;  // 10 minutes (change as needed)
 // 60000 = 1 min, 300000 = 5 min, 600000 = 10 min, 1800000 = 30 min
 unsigned long lastCapture = 0;
 
@@ -105,7 +105,7 @@ void setup() {
 void reconnectMQTT() {
   while (!mqtt.connected()) {
     Serial.print("Connecting to MQTT...");
-    String clientId = "ESP32CAM-Electric-" + String(random(0xffff), HEX);
+    String clientId = "ESP32CAM-Gas-" + String(random(0xffff), HEX);
     
     if (mqtt.connect(clientId.c_str(), mqtt_user, mqtt_password)) {
       Serial.println("connected!");
