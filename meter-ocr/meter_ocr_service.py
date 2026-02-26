@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import paho.mqtt.client as mqtt
 import pytesseract
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageOps
 import io
 import re
 import json
@@ -92,9 +92,8 @@ def extract_meter_reading(image_data):
         # Convert to grayscale
         image = image.convert('L')
 
-        # Enhance contrast for better OCR
-        enhancer = ImageEnhance.Contrast(image)
-        image = enhancer.enhance(2.0)
+        # Normalize brightness/contrast regardless of how dark the image is
+        image = ImageOps.autocontrast(image, cutoff=2)
 
         # Save processed image for debugging
         buf = io.BytesIO()

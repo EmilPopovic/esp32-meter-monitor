@@ -100,6 +100,10 @@ void setup() {
   digitalWrite(FLASH_GPIO, HIGH);
   delay(1);
   digitalWrite(FLASH_GPIO, LOW);
+
+  // Bias auto-exposure toward brighter images (range -2 to +2)
+  sensor_t* s = esp_camera_sensor_get();
+  s->set_ae_level(s, 2);
 }
 
 void reconnectMQTT() {
@@ -120,8 +124,14 @@ void reconnectMQTT() {
 
 void captureAndSend() {
   Serial.println("\n>>> Capturing image...");
-  digitalWrite(FLASH_GPIO, HIGH);  // LED on during capture
-  
+  digitalWrite(FLASH_GPIO, HIGH);
+
+  // The camera buffers the last completed frame, which was captured in the dark.
+  // Discard it and wait for AE to settle on the flash-lit scene.
+  camera_fb_t* stale = esp_camera_fb_get();
+  if (stale) esp_camera_fb_return(stale);
+  delay(300);  // ~2 frames at 800x600 — AE converges on flash-lit scene
+
   camera_fb_t * fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("✗ Camera capture failed");
