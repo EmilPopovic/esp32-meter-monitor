@@ -319,6 +319,9 @@ async function saveCfg(){
     setTimeout(()=>s.textContent='',4000);
   }catch(e){s.style.color='#f44';s.textContent='\u2717 '+e.message;}
 }
+window.addField = addField;
+window.delSel   = delSel;
+window.saveCfg  = saveCfg;
 init();
 })();
 </script>
