@@ -27,7 +27,8 @@ METER_UNIT = os.getenv('METER_UNIT', 'kWh')
 DEVICE_CLASS = os.getenv('DEVICE_CLASS', 'energy')
 
 # Tesseract configuration for digits
-TESSERACT_CONFIG = '--psm 7 -c tessedit_char_whitelist=0123456789'
+# --oem 3 = LSTM neural net engine (more robust than legacy)
+TESSERACT_CONFIG = '--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789'
 
 last_reading = None
 reading_history = []
@@ -36,10 +37,11 @@ last_image_processed = None
 
 HTTP_PORT = int(os.getenv('HTTP_PORT', 8080))
 
-# Static crop: percentage of image height to keep (tune via env vars or compose.yaml)
-# View /image/raw in the browser to see the red crop box and adjust until it covers the digits.
+# Static crop: percentage of image dimensions to keep.
+# View /image/raw to see the red crop box; adjust until it covers only the digits.
 CROP_TOP_PCT    = float(os.getenv('CROP_TOP_PCT',    40))
 CROP_BOTTOM_PCT = float(os.getenv('CROP_BOTTOM_PCT', 62))
+CROP_RIGHT_PCT  = float(os.getenv('CROP_RIGHT_PCT',  82))  # trims "m³" from right edge
 
 def annotate_raw_with_crop(raw_bytes):
     """Return the raw image with the active crop region drawn as a red rectangle."""
@@ -48,7 +50,8 @@ def annotate_raw_with_crop(raw_bytes):
     top    = int(h * CROP_TOP_PCT    / 100)
     bottom = int(h * CROP_BOTTOM_PCT / 100)
     draw = ImageDraw.Draw(img)
-    draw.rectangle([(0, top), (img.width - 1, bottom)], outline='red', width=3)
+    right  = int(img.width * CROP_RIGHT_PCT  / 100)
+    draw.rectangle([(0, top), (right, bottom)], outline='red', width=3)
     buf = io.BytesIO()
     img.save(buf, format='JPEG')
     return buf.getvalue()
@@ -113,10 +116,11 @@ def extract_meter_reading(image_data):
         # Normalize brightness/contrast
         image = ImageOps.autocontrast(image, cutoff=2)
 
-        # Static crop to the digit strip — tune CROP_TOP_PCT / CROP_BOTTOM_PCT
-        # in compose.yaml until the red box on /image/raw covers the digits.
-        h = image.height
-        image = image.crop((0, int(h * CROP_TOP_PCT / 100), image.width, int(h * CROP_BOTTOM_PCT / 100)))
+        # Static crop to the digit strip — tune percentages in compose.yaml
+        # until the red box on /image/raw covers only the digits.
+        h, w = image.height, image.width
+        image = image.crop((0, int(h * CROP_TOP_PCT / 100),
+                            int(w * CROP_RIGHT_PCT / 100), int(h * CROP_BOTTOM_PCT / 100)))
 
         # Invert: digits are white-on-dark; Tesseract prefers dark-on-light
         image = ImageOps.invert(image)
@@ -124,6 +128,14 @@ def extract_meter_reading(image_data):
         # Scale up then sharpen — Tesseract accuracy drops sharply on small text
         image = image.resize((image.width * 3, image.height * 3), Image.LANCZOS)
         image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+
+        # Binarize — converts blurry gray edges to crisp black/white,
+        # eliminating camera blur artifacts that trip up Tesseract.
+        # Background is ~255 (white) after invert; digits are dark.
+        image = image.point(lambda x: 255 if x > 160 else 0)
+
+        # White border — Tesseract expects some padding around text
+        image = ImageOps.expand(image, border=20, fill=255)
 
         # Save processed image for debugging
         buf = io.BytesIO()
