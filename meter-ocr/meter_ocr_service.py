@@ -2,7 +2,8 @@
 import paho.mqtt.client as mqtt
 import easyocr
 import numpy as np
-from PIL import Image, ImageOps, ImageDraw
+import cv2
+from PIL import Image, ImageDraw, ImageFilter
 import io
 import re
 import json
@@ -39,11 +40,13 @@ HTTP_PORT = int(os.getenv('HTTP_PORT', 8080))
 CROP_TOP_PCT    = float(os.getenv('CROP_TOP_PCT',    40))
 CROP_BOTTOM_PCT = float(os.getenv('CROP_BOTTOM_PCT', 62))
 
-# Pre-processing
-AUTOCONTRAST_CUTOFF = float(os.getenv('AUTOCONTRAST_CUTOFF', 2))
+# Pre-processing — CLAHE replaces global autocontrast; works far better for dark/uneven images
+CLAHE_CLIP_LIMIT = float(os.getenv('CLAHE_CLIP_LIMIT', 3.0))  # higher = more contrast, more noise
+CLAHE_TILE_SIZE  = int(os.getenv('CLAHE_TILE_SIZE',    2))     # tile grid dimension (NxN)
+BRIGHTNESS_BOOST = float(os.getenv('BRIGHTNESS_BOOST', 1.0))  # >1 brightens, useful when too dark
 # Per-digit OCR tuning
-DIGIT_SCALE          = int(os.getenv('DIGIT_SCALE', 3))       # upscale before readtext fallback
-DIGIT_CONF_THRESHOLD = float(os.getenv('DIGIT_CONF_THRESHOLD', 0.2))  # reject below this confidence
+DIGIT_SCALE          = int(os.getenv('DIGIT_SCALE', 3))
+DIGIT_CONF_THRESHOLD = float(os.getenv('DIGIT_CONF_THRESHOLD', 0.15))
 
 
 def _parse_fields(env_var, default):
@@ -74,9 +77,28 @@ ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
 print("✓ EasyOCR ready")
 
 
+_clahe = None  # created lazily after cv2 import succeeds
+
 def _preprocess(region):
-    gray = ImageOps.autocontrast(region.convert('L'), cutoff=AUTOCONTRAST_CUTOFF)
-    return gray.convert('RGB')
+    global _clahe
+    gray = np.array(region.convert('L'))
+
+    # CLAHE: adaptive local contrast enhancement per tile.
+    # Much better than global autocontrast on dark/unevenly-lit images because
+    # it boosts contrast independently in each tile instead of stretching noise globally.
+    if _clahe is None:
+        _clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT,
+                                  tileGridSize=(CLAHE_TILE_SIZE, CLAHE_TILE_SIZE))
+    gray = _clahe.apply(gray)
+
+    # Optional brightness boost (multiply pixel values before clamping to 0-255)
+    if BRIGHTNESS_BOOST != 1.0:
+        gray = np.clip(gray.astype(np.float32) * BRIGHTNESS_BOOST, 0, 255).astype(np.uint8)
+
+    # Unsharp mask to recover edge definition lost to blur/diffusion
+    img = Image.fromarray(gray)
+    img = img.filter(ImageFilter.UnsharpMask(radius=1, percent=120, threshold=2))
+    return img.convert('RGB')
 
 
 def _ocr_digit(img_rgb, label):

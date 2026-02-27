@@ -51,15 +51,18 @@ services:
       - METER_NAME=Gas Meter Reading
       - METER_ID=gas_meter_reading
       # --- Vertical crop (% of image height) — shared by all digit fields ---
-      - CROP_TOP_PCT=42
-      - CROP_BOTTOM_PCT=60
+      - CROP_TOP_PCT=45
+      - CROP_BOTTOM_PCT=57
       # --- One box per digit roller (% of image width, L:R pairs) ---
       # Check /image/raw to see the numbered boxes; tune until each covers one roller face.
       # Remove the first entry from DIGIT_FIELDS to ignore the leftmost (static) digit.
-      - DIGIT_FIELDS=5:15,17:27,29:39,41:50
-      - DECIMAL_FIELDS=53:62,64:72
+      - DIGIT_FIELDS=10:16,20:26,31:37
+      - DECIMAL_FIELDS=42:48,53:59
       # --- Pre-processing ---
-      - AUTOCONTRAST_CUTOFF=2
+      # CLAHE: local contrast enhancement — raise CLAHE_CLIP_LIMIT for more punch,
+      # raise BRIGHTNESS_BOOST (e.g. 1.5–2.0) if the image is too dark after black tape.
+      - CLAHE_CLIP_LIMIT=3.0
+      - BRIGHTNESS_BOOST=1.5
       - METER_UNIT=m³
       - DEVICE_CLASS=gas
     restart: unless-stopped
