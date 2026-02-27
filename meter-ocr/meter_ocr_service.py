@@ -283,12 +283,12 @@ cv.onmousemove=e=>{
     return;
   }
   if(drag.type==='crop'){
-    const np=drag.op+yp(y-drag.sy);
+    const np=drag.op+(y-drag.sy)/cv.height*100;
     if(drag.w==='top')cfg.crop_top_pct=Math.min(np,cfg.crop_bottom_pct-2);
     else cfg.crop_bottom_pct=Math.max(np,cfg.crop_top_pct+2);
   }else{
     const fs=drag.g==='digit'?cfg.digit_fields:cfg.decimal_fields;
-    const dx=xp(x-drag.sx);
+    const dx=(x-drag.sx)/cv.width*100;
     if(drag.e==='l')fs[drag.i][0]=Math.max(0,Math.min(drag.ol+dx,fs[drag.i][1]-1));
     else if(drag.e==='r')fs[drag.i][1]=Math.max(fs[drag.i][0]+1,Math.min(100,drag.or+dx));
     else{const w=drag.or-drag.ol,nl=Math.max(0,Math.min(100-w,drag.ol+dx));fs[drag.i][0]=nl;fs[drag.i][1]=nl+w;}
