@@ -30,6 +30,8 @@ services:
       - METER_ID=electric_meter_reading
       - METER_UNIT=kWh
       - DEVICE_CLASS=energy
+    volumes:
+      - ./config/electric:/app/config
     restart: unless-stopped
     networks:
       iot_net:
@@ -65,6 +67,8 @@ services:
       - BRIGHTNESS_BOOST=1.5
       - METER_UNIT=m³
       - DEVICE_CLASS=gas
+    volumes:
+      - ./config/gas:/app/config   # field positions saved here by the web GUI
     restart: unless-stopped
     networks:
       iot_net:
