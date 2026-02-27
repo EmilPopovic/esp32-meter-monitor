@@ -133,22 +133,30 @@ def extract_meter_reading(image_data):
         last_image_processed = buf.getvalue()
 
         # Run EasyOCR — allowlist restricts recognition to digits only
+        # detail=1 gives bounding boxes so we can sort left-to-right
         results = ocr_reader.readtext(
             np.array(cropped),
             allowlist='0123456789',
-            detail=0,
+            detail=1,
             paragraph=False,
         )
-        text = ''.join(results)
+        # Sort detections left-to-right by the x-coordinate of the top-left corner
+        results.sort(key=lambda r: r[0][0][0])
+
+        for bbox, txt, conf in results:
+            print(f"  EasyOCR: '{txt}' (conf={conf:.2f}, x={int(bbox[0][0])})")
+
+        text = ''.join(txt for _, txt, _ in results)
         clean_text = re.sub(r'[^0-9]', '', text)
+        print(f"  Joined: '{clean_text}'")
 
-        print(f"  EasyOCR raw: {results}")
-        print(f"  Cleaned: '{clean_text}'")
-
-        matches = re.findall(r'\d{6,7}', clean_text)
+        # Accept 4–7 digits: meter shows ~4 integer digits + optional decimal digits
+        matches = re.findall(r'\d{4,7}', clean_text)
 
         if matches:
-            reading = int(matches[0])
+            # Take the longest match (most complete reading)
+            raw_digits = max(matches, key=len)
+            reading = int(raw_digits)
 
             global last_reading
             if last_reading is not None:
@@ -172,7 +180,7 @@ def extract_meter_reading(image_data):
 
             return reading
         else:
-            print(f"  ✗ No valid 6-7 digit reading found")
+            print(f"  ✗ No valid 4-7 digit reading found")
             return None
 
     except Exception as e:
