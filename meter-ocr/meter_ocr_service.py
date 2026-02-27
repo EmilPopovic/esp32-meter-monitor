@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import paho.mqtt.client as mqtt
 import pytesseract
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageOps, ImageFilter, ImageDraw
 import io
 import re
 import json
@@ -36,10 +36,28 @@ last_image_processed = None
 
 HTTP_PORT = int(os.getenv('HTTP_PORT', 8080))
 
+# Static crop: percentage of image height to keep (tune via env vars or compose.yaml)
+# View /image/raw in the browser to see the red crop box and adjust until it covers the digits.
+CROP_TOP_PCT    = float(os.getenv('CROP_TOP_PCT',    40))
+CROP_BOTTOM_PCT = float(os.getenv('CROP_BOTTOM_PCT', 62))
+
+def annotate_raw_with_crop(raw_bytes):
+    """Return the raw image with the active crop region drawn as a red rectangle."""
+    img = Image.open(io.BytesIO(raw_bytes))
+    h = img.height
+    top    = int(h * CROP_TOP_PCT    / 100)
+    bottom = int(h * CROP_BOTTOM_PCT / 100)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([(0, top), (img.width - 1, bottom)], outline='red', width=3)
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG')
+    return buf.getvalue()
+
 class ImageHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/image/raw':
-            self._serve_image(last_image_raw)
+            data = annotate_raw_with_crop(last_image_raw) if last_image_raw else None
+            self._serve_image(data)
         elif self.path in ('/image', '/image/processed'):
             self._serve_image(last_image_processed)
         elif self.path == '/':
@@ -79,37 +97,6 @@ def start_http_server():
     print(f"✓ Image viewer running on port {HTTP_PORT}")
     server.serve_forever()
 
-def crop_to_digit_strip(image):
-    """Crop to the dark odometer band by finding the darkest horizontal region."""
-    width, height = image.size
-    pixels = list(image.getdata())
-
-    row_means = [sum(pixels[y * width:(y + 1) * width]) / width for y in range(height)]
-    overall_mean = sum(row_means) / height
-    dark_thresh = overall_mean * 0.55
-
-    best_start = best_end = cur_start = 0
-    in_band = False
-    for y, m in enumerate(row_means):
-        if m < dark_thresh:
-            if not in_band:
-                cur_start = y
-                in_band = True
-        else:
-            if in_band:
-                if (y - cur_start) > (best_end - best_start):
-                    best_start, best_end = cur_start, y
-                in_band = False
-    if in_band and (height - cur_start) > (best_end - best_start):
-        best_start, best_end = cur_start, height
-
-    if best_end == best_start:
-        return image  # couldn't detect strip, fall back to full image
-
-    pad = max(5, (best_end - best_start) // 3)
-    return image.crop((0, max(0, best_start - pad), width, min(height, best_end + pad)))
-
-
 def extract_meter_reading(image_data):
     """Extract 7-digit meter reading from image"""
     global last_image_raw, last_image_processed
@@ -126,9 +113,10 @@ def extract_meter_reading(image_data):
         # Normalize brightness/contrast
         image = ImageOps.autocontrast(image, cutoff=2)
 
-        # Crop to the dark digit strip — removes all the surrounding text that
-        # confuses PSM 7 (KOM Zagreb, Plinomjer G4R, etc.)
-        image = crop_to_digit_strip(image)
+        # Static crop to the digit strip — tune CROP_TOP_PCT / CROP_BOTTOM_PCT
+        # in compose.yaml until the red box on /image/raw covers the digits.
+        h = image.height
+        image = image.crop((0, int(h * CROP_TOP_PCT / 100), image.width, int(h * CROP_BOTTOM_PCT / 100)))
 
         # Invert: digits are white-on-dark; Tesseract prefers dark-on-light
         image = ImageOps.invert(image)

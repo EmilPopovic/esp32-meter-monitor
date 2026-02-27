@@ -50,6 +50,8 @@ services:
       - CONFIG_TOPIC=homeassistant/sensor/gas_meter/config
       - METER_NAME=Gas Meter Reading
       - METER_ID=gas_meter_reading
+      - CROP_TOP_PCT=40
+      - CROP_BOTTOM_PCT=62
       - METER_UNIT=m³
       - DEVICE_CLASS=gas
     restart: unless-stopped
