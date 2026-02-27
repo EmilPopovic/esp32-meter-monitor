@@ -57,16 +57,6 @@ services:
       - CROP_RIGHT_PCT=82
       # --- Pre-processing ---
       - AUTOCONTRAST_CUTOFF=2
-      - SCALE_FACTOR=3
-      - SHARPEN_RADIUS=2
-      - SHARPEN_PERCENT=150
-      # --- Adaptive threshold ---
-      - ADAPTIVE_RADIUS=40
-      - ADAPTIVE_OFFSET=20
-      # --- Frame bar removal (fraction of row that must be black to blank it) ---
-      - FRAME_ROW_THRESHOLD=0.80
-      # --- Tesseract padding ---
-      - BORDER_SIZE=20
       - METER_UNIT=m³
       - DEVICE_CLASS=gas
     restart: unless-stopped

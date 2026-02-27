@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 import paho.mqtt.client as mqtt
-import pytesseract
-from PIL import Image, ImageOps, ImageFilter, ImageDraw
+import easyocr
+import numpy as np
+from PIL import Image, ImageOps, ImageDraw
 import io
 import re
 import json
@@ -26,10 +27,6 @@ METER_ID = os.getenv('METER_ID', 'electric_meter_reading')
 METER_UNIT = os.getenv('METER_UNIT', 'kWh')
 DEVICE_CLASS = os.getenv('DEVICE_CLASS', 'energy')
 
-# Tesseract configuration for digits
-# --oem 3 = LSTM neural net engine (more robust than legacy)
-TESSERACT_CONFIG = '--psm 7 --oem 3 -c tessedit_char_whitelist=0123456789'
-
 last_reading = None
 reading_history = []
 last_image_raw = None
@@ -45,24 +42,13 @@ CROP_LEFT_PCT   = float(os.getenv('CROP_LEFT_PCT',    0))
 CROP_RIGHT_PCT  = float(os.getenv('CROP_RIGHT_PCT',  82))
 
 # --- Pre-processing ---
-AUTOCONTRAST_CUTOFF = float(os.getenv('AUTOCONTRAST_CUTOFF', 2))   # % to clip at each end
-SCALE_FACTOR        = int(os.getenv('SCALE_FACTOR',           3))   # upscale before OCR
-SHARPEN_RADIUS      = float(os.getenv('SHARPEN_RADIUS',       2))   # unsharp mask radius
-SHARPEN_PERCENT     = int(os.getenv('SHARPEN_PERCENT',       150))  # unsharp mask strength
+AUTOCONTRAST_CUTOFF = float(os.getenv('AUTOCONTRAST_CUTOFF', 2))
 
-# --- Adaptive threshold ---
-# GaussianBlur radius sets the neighbourhood size; offset is how much darker than
-# the local mean a pixel must be to count as a digit stroke.
-ADAPTIVE_RADIUS = int(os.getenv('ADAPTIVE_RADIUS', 40))
-ADAPTIVE_OFFSET = int(os.getenv('ADAPTIVE_OFFSET', 20))
+# Initialise EasyOCR once — loading the model takes a few seconds
+print("Loading EasyOCR model...")
+ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+print("✓ EasyOCR ready")
 
-# --- Frame bar removal ---
-# Rows where more than this fraction of pixels are black after thresholding are
-# treated as border/frame and blanked out (set to white).
-FRAME_ROW_THRESHOLD = float(os.getenv('FRAME_ROW_THRESHOLD', 0.80))
-
-# --- Padding added around the final image before Tesseract ---
-BORDER_SIZE = int(os.getenv('BORDER_SIZE', 20))
 
 def annotate_raw_with_crop(raw_bytes):
     """Return the raw image with the active crop region drawn as a red rectangle."""
@@ -70,13 +56,14 @@ def annotate_raw_with_crop(raw_bytes):
     h = img.height
     top    = int(h * CROP_TOP_PCT    / 100)
     bottom = int(h * CROP_BOTTOM_PCT / 100)
-    draw = ImageDraw.Draw(img)
     left   = int(img.width * CROP_LEFT_PCT   / 100)
     right  = int(img.width * CROP_RIGHT_PCT  / 100)
+    draw = ImageDraw.Draw(img)
     draw.rectangle([(left, top), (right, bottom)], outline='red', width=3)
     buf = io.BytesIO()
     img.save(buf, format='JPEG')
     return buf.getvalue()
+
 
 class ImageHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -106,7 +93,7 @@ class ImageHandler(BaseHTTPRequestHandler):
         body = f"""<html><body>
 <h2>{METER_NAME}</h2>
 <p>Last reading: {last_reading} {METER_UNIT if last_reading else 'N/A'}</p>
-<p><a href="/image/raw">Raw image</a> &nbsp; <a href="/image/processed">Processed image (what Tesseract sees)</a></p>
+<p><a href="/image/raw">Raw image (with crop box)</a> &nbsp; <a href="/image/processed">Cropped image sent to OCR</a></p>
 </body></html>""".encode()
         self.send_response(200)
         self.send_header('Content-Type', 'text/html')
@@ -117,124 +104,88 @@ class ImageHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # suppress access logs
 
+
 def start_http_server():
     server = HTTPServer(('0.0.0.0', HTTP_PORT), ImageHandler)
     print(f"✓ Image viewer running on port {HTTP_PORT}")
     server.serve_forever()
 
+
 def extract_meter_reading(image_data):
-    """Extract 7-digit meter reading from image"""
+    """Extract meter reading from image using EasyOCR."""
     global last_image_raw, last_image_processed
     try:
-        # Save raw image for debugging
         last_image_raw = image_data
 
-        # Load image
+        # Load and crop to the digit strip (keep colour — EasyOCR handles it natively)
         image = Image.open(io.BytesIO(image_data))
-
-        # Convert to grayscale
-        image = image.convert('L')
-
-        # Normalize brightness/contrast
-        image = ImageOps.autocontrast(image, cutoff=AUTOCONTRAST_CUTOFF)
-
-        # Static crop — tune percentages in compose.yaml
         h, w = image.height, image.width
-        image = image.crop((int(w * CROP_LEFT_PCT   / 100), int(h * CROP_TOP_PCT    / 100),
-                            int(w * CROP_RIGHT_PCT  / 100), int(h * CROP_BOTTOM_PCT / 100)))
+        cropped = image.crop((int(w * CROP_LEFT_PCT   / 100), int(h * CROP_TOP_PCT    / 100),
+                              int(w * CROP_RIGHT_PCT  / 100), int(h * CROP_BOTTOM_PCT / 100)))
 
-        # Invert: digits are white-on-dark; Tesseract prefers dark-on-light
-        image = ImageOps.invert(image)
+        # Light contrast normalisation helps on very dark/bright images
+        cropped_gray = ImageOps.autocontrast(cropped.convert('L'), cutoff=AUTOCONTRAST_CUTOFF)
+        cropped = cropped_gray.convert('RGB')
 
-        # Scale up then sharpen
-        image = image.resize((image.width * SCALE_FACTOR, image.height * SCALE_FACTOR), Image.LANCZOS)
-        image = image.filter(ImageFilter.UnsharpMask(radius=SHARPEN_RADIUS, percent=SHARPEN_PERCENT, threshold=3))
-
-        # Adaptive threshold — local mean per region handles uneven lighting
-        local_mean = image.filter(ImageFilter.GaussianBlur(radius=ADAPTIVE_RADIUS))
-        img_px  = list(image.getdata())
-        mean_px = list(local_mean.getdata())
-        binary  = [0 if p < m - ADAPTIVE_OFFSET else 255 for p, m in zip(img_px, mean_px)]
-        image = Image.new('L', image.size)
-        image.putdata(binary)
-
-        # Remove frame bars — rows that are >FRAME_ROW_THRESHOLD black are metal
-        # border (not digits) and get blanked to white
-        cw = image.width
-        px = list(image.getdata())
-        for y in range(image.height):
-            row = px[y * cw:(y + 1) * cw]
-            if sum(1 for p in row if p == 0) / cw > FRAME_ROW_THRESHOLD:
-                for x in range(cw):
-                    px[y * cw + x] = 255
-        image.putdata(px)
-
-        # Padding — Tesseract works better with whitespace around text
-        image = ImageOps.expand(image, border=BORDER_SIZE, fill=255)
-
-        # Save processed image for debugging
+        # Save cropped image so /image/processed shows exactly what EasyOCR receives
         buf = io.BytesIO()
-        image.save(buf, format='JPEG')
+        cropped.save(buf, format='JPEG')
         last_image_processed = buf.getvalue()
 
-        # Perform OCR
-        text = pytesseract.image_to_string(image, config=TESSERACT_CONFIG)
-        
-        # Clean text - remove spaces and non-digits
+        # Run EasyOCR — allowlist restricts recognition to digits only
+        results = ocr_reader.readtext(
+            np.array(cropped),
+            allowlist='0123456789',
+            detail=0,
+            paragraph=False,
+        )
+        text = ''.join(results)
         clean_text = re.sub(r'[^0-9]', '', text)
-        
-        print(f"  OCR raw text: '{text.strip()}'")
+
+        print(f"  EasyOCR raw: {results}")
         print(f"  Cleaned: '{clean_text}'")
-        
-        # Extract 6 or 7 digit number (some meters have 6 digits)
+
         matches = re.findall(r'\d{6,7}', clean_text)
-        
+
         if matches:
             reading = int(matches[0])
-            
-            # Sanity check: reading should only increase or stay same
+
             global last_reading
             if last_reading is not None:
-                if reading < last_reading - 10:  # Allow small decreases for OCR errors
-                    print(f"  ⚠ Reading decreased suspiciously: {last_reading} -> {reading}")
-                    print(f"  Skipping potentially incorrect reading")
+                if reading < last_reading - 10:
+                    print(f"  ⚠ Reading decreased suspiciously: {last_reading} -> {reading}, skipping")
                     return None
-                elif reading > last_reading + 1000:  # Unrealistic increase
-                    print(f"  ⚠ Reading increased suspiciously: {last_reading} -> {reading}")
-                    print(f"  Skipping potentially incorrect reading")
+                elif reading > last_reading + 1000:
+                    print(f"  ⚠ Reading increased suspiciously: {last_reading} -> {reading}, skipping")
                     return None
-            
+
             print(f"  ✓ Reading extracted: {reading} {METER_UNIT}")
             last_reading = reading
-            
-            # Keep history for debugging
+
             reading_history.append({
                 'reading': reading,
                 'timestamp': time.time(),
-                'raw_text': text.strip()
+                'raw_text': text,
             })
             if len(reading_history) > 100:
                 reading_history.pop(0)
-            
+
             return reading
         else:
             print(f"  ✗ No valid 6-7 digit reading found")
             return None
-            
+
     except Exception as e:
         print(f"  ✗ OCR error: {e}")
         return None
 
+
 def on_connect(client, userdata, flags, rc):
-    """Callback when connected to MQTT broker"""
     if rc == 0:
         print(f"✓ Connected to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
-        
-        # Subscribe to image topic
         client.subscribe(IMAGE_TOPIC)
         print(f"✓ Subscribed to {IMAGE_TOPIC}")
-        
-        # Publish Home Assistant discovery config
+
         discovery_config = {
             "name": METER_NAME,
             "unique_id": METER_ID,
@@ -246,36 +197,30 @@ def on_connect(client, userdata, flags, rc):
         }
         client.publish(CONFIG_TOPIC, json.dumps(discovery_config), retain=True)
         print(f"✓ Published HA discovery config to {CONFIG_TOPIC}")
-        
     else:
         print(f"✗ Connection failed with code {rc}")
 
+
 def on_message(client, userdata, msg):
-    """Callback when image received"""
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     print(f"\n[{timestamp}] Image received ({len(msg.payload)} bytes)")
-    
-    # Extract reading
+
     reading = extract_meter_reading(msg.payload)
-    
+
     if reading:
-        # Publish to Home Assistant
         client.publish(STATE_TOPIC, str(reading), retain=True)
-        
-        # Also publish detailed info for debugging
         detail = {
             "reading": reading,
             "timestamp": time.time(),
             "timestamp_human": timestamp
         }
         client.publish(READING_TOPIC, json.dumps(detail))
-        
         print(f"  ✓ Published to HA: {reading} {METER_UNIT}")
     else:
         print(f"  ✗ No valid reading extracted")
 
+
 def main():
-    """Main loop"""
     print("=" * 60)
     print(f"Meter OCR Service Starting - {METER_NAME}")
     print("=" * 60)
@@ -284,20 +229,17 @@ def main():
     print(f"Image Topic: {IMAGE_TOPIC}")
     print(f"State Topic: {STATE_TOPIC}")
     print("=" * 60)
-    
-    # Start HTTP image viewer
+
     t = threading.Thread(target=start_http_server, daemon=True)
     t.start()
 
-    # Create MQTT client
     client = mqtt.Client()
     client.on_connect = on_connect
     client.on_message = on_message
-    
+
     if MQTT_USER:
         client.username_pw_set(MQTT_USER, MQTT_PASS)
-    
-    # Connect to broker with retry
+
     while True:
         try:
             print(f"\nConnecting to MQTT broker...")
@@ -307,10 +249,10 @@ def main():
             print(f"✗ Connection failed: {e}")
             print("  Retrying in 5 seconds...")
             time.sleep(5)
-    
-    # Start loop
+
     print("✓ Service running. Waiting for images...\n")
     client.loop_forever()
+
 
 if __name__ == "__main__":
     main()
