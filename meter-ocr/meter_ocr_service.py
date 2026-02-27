@@ -316,13 +316,17 @@ def extract_meter_reading(image_data):
             print(f"  ✗ Only {len(clean_text)}/{expected_len} digits read — likely mid-transition")
             return None
 
-        reading = int(clean_text[:7])  # cap at 7 digits for safety
+        # Scale to real-world units: the last len(DECIMAL_FIELDS) digits are the fractional part.
+        # e.g. INT='132' DEC='64' → digits '13264' → 132.64 m³  (divide by 10^2)
+        n_dec = len(DECIMAL_FIELDS)
+        raw_int = int(clean_text[:7])  # cap total digits for safety
+        reading = round(raw_int / (10 ** n_dec), n_dec)
 
         if last_reading is not None:
-            if reading < last_reading - 10:
+            if reading < last_reading - 1.0:
                 print(f"  ⚠ Reading decreased suspiciously: {last_reading} -> {reading}, skipping")
                 return None
-            elif reading > last_reading + 1000:
+            elif reading > last_reading + 10.0:
                 print(f"  ⚠ Reading increased suspiciously: {last_reading} -> {reading}, skipping")
                 return None
 
