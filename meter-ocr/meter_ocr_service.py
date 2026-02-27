@@ -35,21 +35,36 @@ last_image_annotated = None
 
 HTTP_PORT = int(os.getenv('HTTP_PORT', 8080))
 
-# --- Vertical crop (% of image height) — shared by both fields ---
+# Vertical crop shared by all digit fields (% of image height)
 CROP_TOP_PCT    = float(os.getenv('CROP_TOP_PCT',    40))
 CROP_BOTTOM_PCT = float(os.getenv('CROP_BOTTOM_PCT', 62))
 
-# --- Two detection fields (% of image width) ---
-# Field 1 (red box):  integer digits, left of the decimal separator
-# Field 2 (blue box): decimal digits, right of the decimal separator
-# Set FIELD2_RIGHT_PCT <= FIELD2_LEFT_PCT to disable field 2 (single-field mode)
-FIELD1_LEFT_PCT  = float(os.getenv('FIELD1_LEFT_PCT',   0))
-FIELD1_RIGHT_PCT = float(os.getenv('FIELD1_RIGHT_PCT', 50))
-FIELD2_LEFT_PCT  = float(os.getenv('FIELD2_LEFT_PCT',  52))
-FIELD2_RIGHT_PCT = float(os.getenv('FIELD2_RIGHT_PCT', 82))
-
-# --- Pre-processing ---
+# Pre-processing
 AUTOCONTRAST_CUTOFF = float(os.getenv('AUTOCONTRAST_CUTOFF', 2))
+
+
+def _parse_fields(env_var, default):
+    """Parse 'L:R,L:R,...' (% of image width) into [(left_pct, right_pct), ...]."""
+    raw = os.getenv(env_var, default)
+    fields = []
+    for part in raw.split(','):
+        part = part.strip()
+        if ':' in part:
+            try:
+                l, r = part.split(':', 1)
+                fields.append((float(l), float(r)))
+            except ValueError:
+                pass
+    return fields
+
+
+# Each entry covers exactly one digit roller.
+# View /image/raw to see the numbered boxes and tune boundaries.
+# Integer digits (red boxes): left of decimal separator
+DIGIT_FIELDS   = _parse_fields('DIGIT_FIELDS',   '5:15,17:27,29:39,41:50')
+# Decimal digits (blue boxes): right of decimal separator
+DECIMAL_FIELDS = _parse_fields('DECIMAL_FIELDS', '53:62,64:72')
+
 
 print("Loading EasyOCR model...")
 ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
@@ -61,38 +76,46 @@ def _preprocess(region):
     return gray.convert('RGB')
 
 
-def annotate_raw_with_crop(raw_bytes):
-    """Return raw image with field regions as coloured rectangles (red=field1, blue=field2)."""
-    img = Image.open(io.BytesIO(raw_bytes))
-    h, w = img.height, img.width
-    top    = int(h * CROP_TOP_PCT    / 100)
-    bottom = int(h * CROP_BOTTOM_PCT / 100)
-    f1l = int(w * FIELD1_LEFT_PCT  / 100)
-    f1r = int(w * FIELD1_RIGHT_PCT / 100)
-    f2l = int(w * FIELD2_LEFT_PCT  / 100)
-    f2r = int(w * FIELD2_RIGHT_PCT / 100)
-    draw = ImageDraw.Draw(img)
-    draw.rectangle([(f1l, top), (f1r, bottom)], outline='red',  width=3)
-    if f2r > f2l:
-        draw.rectangle([(f2l, top), (f2r, bottom)], outline='blue', width=3)
-    buf = io.BytesIO()
-    img.save(buf, format='JPEG')
-    return buf.getvalue()
-
-
-def _ocr_field(img_rgb, label):
-    """Run EasyOCR on a preprocessed PIL image. Returns (digit_str, raw_results)."""
+def _ocr_digit(img_rgb, label):
+    """OCR a single-roller crop. Returns (digit_char, results)."""
     results = ocr_reader.readtext(
         np.array(img_rgb),
         allowlist='0123456789',
         detail=1,
         paragraph=False,
     )
-    results.sort(key=lambda r: r[0][0][0])
-    for bbox, txt, conf in results:
-        print(f"  {label}: '{txt}' (conf={conf:.2f}, x={int(bbox[0][0])})")
-    digits = re.sub(r'[^0-9]', '', ''.join(txt for _, txt, _ in results))
-    return digits, results
+    if not results:
+        print(f"  {label}: - (nothing detected)")
+        return '', []
+    # Take the highest-confidence detection and use its first digit
+    best_bbox, best_txt, best_conf = max(results, key=lambda r: r[2])
+    digit = re.sub(r'[^0-9]', '', best_txt)
+    digit = digit[0] if digit else ''
+    print(f"  {label}: '{digit}' (conf={best_conf:.2f})")
+    return digit, results
+
+
+def annotate_raw_with_crop(raw_bytes):
+    """Raw image with each digit field drawn as a numbered box (red=integer, blue=decimal)."""
+    img = Image.open(io.BytesIO(raw_bytes))
+    h, w = img.height, img.width
+    top    = int(h * CROP_TOP_PCT    / 100)
+    bottom = int(h * CROP_BOTTOM_PCT / 100)
+    draw = ImageDraw.Draw(img)
+
+    for i, (l, r) in enumerate(DIGIT_FIELDS):
+        x0, x1 = int(w * l / 100), int(w * r / 100)
+        draw.rectangle([(x0, top), (x1, bottom)], outline='red', width=2)
+        draw.text((x0 + 3, top + 3), str(i + 1), fill='red')
+
+    for i, (l, r) in enumerate(DECIMAL_FIELDS):
+        x0, x1 = int(w * l / 100), int(w * r / 100)
+        draw.rectangle([(x0, top), (x1, bottom)], outline='blue', width=2)
+        draw.text((x0 + 3, top + 3), f"d{i + 1}", fill='blue')
+
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG')
+    return buf.getvalue()
 
 
 class ImageHandler(BaseHTTPRequestHandler):
@@ -126,9 +149,9 @@ class ImageHandler(BaseHTTPRequestHandler):
 <h2>{METER_NAME}</h2>
 <p>Last reading: {last_reading} {METER_UNIT if last_reading else 'N/A'}</p>
 <p>
-  <a href="/image/raw">Raw image (field boxes: red=integers, blue=decimals)</a><br>
-  <a href="/image/processed">Processed fields (what EasyOCR receives)</a><br>
-  <a href="/image/annotated">Annotated detections (red=field1, blue=field2)</a>
+  <a href="/image/raw">Raw image — numbered field boxes (red=integer, blue=decimal)</a><br>
+  <a href="/image/processed">Processed — individual digit crops</a><br>
+  <a href="/image/annotated">Annotated — EasyOCR detections per field</a>
 </p>
 </body></html>""".encode()
         self.send_response(200)
@@ -138,7 +161,7 @@ class ImageHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format, *args):
-        pass  # suppress access logs
+        pass
 
 
 def start_http_server():
@@ -153,66 +176,81 @@ def extract_meter_reading(image_data):
         last_image_raw = image_data
         image = Image.open(io.BytesIO(image_data))
         h, w = image.height, image.width
-
         top    = int(h * CROP_TOP_PCT    / 100)
         bottom = int(h * CROP_BOTTOM_PCT / 100)
-        f1l = int(w * FIELD1_LEFT_PCT  / 100)
-        f1r = int(w * FIELD1_RIGHT_PCT / 100)
-        f2l = int(w * FIELD2_LEFT_PCT  / 100)
-        f2r = int(w * FIELD2_RIGHT_PCT / 100)
+        strip_h = bottom - top
 
-        use_field2 = f2r > f2l
+        # --- Crop each field ---
+        def crop_fields(field_defs):
+            return [_preprocess(image.crop((int(w * l / 100), top, int(w * r / 100), bottom)))
+                    for l, r in field_defs]
 
-        field1 = _preprocess(image.crop((f1l, top, f1r, bottom)))
-        field2 = _preprocess(image.crop((f2l, top, f2r, bottom))) if use_field2 else None
+        int_imgs = crop_fields(DIGIT_FIELDS)
+        dec_imgs = crop_fields(DECIMAL_FIELDS)
 
-        # --- Combined processed image (field1 | grey gap | field2) ---
-        GAP = 8
-        f1w = f1r - f1l
-        f2w = (f2r - f2l) if use_field2 else 0
-        combined_w = f1w + (GAP + f2w if use_field2 else 0)
-        combined_h = bottom - top
-        combined = Image.new('RGB', (combined_w, combined_h), color=(160, 160, 160))
-        combined.paste(field1, (0, 0))
-        if use_field2:
-            combined.paste(field2, (f1w + GAP, 0))
+        # --- Build composite processed image ---
+        INNER_GAP = 4
+        OUTER_GAP = 14
+        # Lay out: [int fields] [outer gap] [dec fields]
+        rendered = []   # (img, x_offset, is_decimal, field_index)
+        x = 0
+        for i, img in enumerate(int_imgs):
+            if i > 0:
+                x += INNER_GAP
+            rendered.append((img, x, False, i))
+            x += img.width
+        if dec_imgs:
+            x += OUTER_GAP
+            for i, img in enumerate(dec_imgs):
+                if i > 0:
+                    x += INNER_GAP
+                rendered.append((img, x, True, i))
+                x += img.width
+
+        combined = Image.new('RGB', (x, strip_h), color=(140, 140, 140))
+        for img, x_off, _, _ in rendered:
+            combined.paste(img, (x_off, 0))
         buf = io.BytesIO()
         combined.save(buf, format='JPEG')
         last_image_processed = buf.getvalue()
 
         # --- OCR each field independently ---
-        digits1, det1 = _ocr_field(field1, 'Field1')
-        digits2, det2 = _ocr_field(field2, 'Field2') if use_field2 else ('', [])
-        clean_text = digits1 + digits2
-        print(f"  Field1='{digits1}' Field2='{digits2}' Combined='{clean_text}'")
+        results_per_field = []
+        for i, img in enumerate(int_imgs):
+            digit, dets = _ocr_digit(img, f"INT{i+1}")
+            results_per_field.append((digit, dets, False, i))
+        for i, img in enumerate(dec_imgs):
+            digit, dets = _ocr_digit(img, f"DEC{i+1}")
+            results_per_field.append((digit, dets, True, i))
 
-        # --- Annotated image with bounding boxes ---
+        # --- Annotated image ---
         annotated = combined.copy()
         draw = ImageDraw.Draw(annotated)
-        for bbox, txt, conf in det1:
-            x0, y0 = int(bbox[0][0]), int(bbox[0][1])
-            x1, y1 = int(bbox[2][0]), int(bbox[2][1])
-            draw.rectangle([(x0, y0), (x1, y1)], outline='red', width=2)
-            draw.text((x0 + 2, y0 + 2), txt, fill='red')
-        if use_field2:
-            offset_x = f1w + GAP
-            for bbox, txt, conf in det2:
-                x0, y0 = int(bbox[0][0]) + offset_x, int(bbox[0][1])
-                x1, y1 = int(bbox[2][0]) + offset_x, int(bbox[2][1])
-                draw.rectangle([(x0, y0), (x1, y1)], outline='blue', width=2)
-                draw.text((x0 + 2, y0 + 2), txt, fill='blue')
+        for (digit, dets, is_dec, field_idx), (img, x_off, _, _) in zip(results_per_field, rendered):
+            color = 'blue' if is_dec else 'red'
+            for bbox, txt, conf in dets:
+                x0, y0 = int(bbox[0][0]) + x_off, int(bbox[0][1])
+                x1, y1 = int(bbox[2][0]) + x_off, int(bbox[2][1])
+                draw.rectangle([(x0, y0), (x1, y1)], outline=color, width=2)
+            # Show what we extracted from this field
+            draw.text((x_off + 2, 2), digit if digit else '?', fill=color)
         buf = io.BytesIO()
         annotated.save(buf, format='JPEG')
         last_image_annotated = buf.getvalue()
 
-        # --- Validate and sanity-check the reading ---
-        matches = re.findall(r'\d{4,7}', clean_text)
-        if not matches:
-            print(f"  ✗ No valid 4-7 digit reading found in '{clean_text}'")
+        # --- Assemble reading ---
+        int_digits  = ''.join(d for d, _, is_dec, _ in results_per_field if not is_dec)
+        dec_digits  = ''.join(d for d, _, is_dec, _ in results_per_field if is_dec)
+        clean_text  = int_digits + dec_digits
+        print(f"  INT='{int_digits}' DEC='{dec_digits}' Combined='{clean_text}'")
+
+        # Require all configured fields to return a digit (any blank = roller mid-transition)
+        expected_len = len(DIGIT_FIELDS) + len(DECIMAL_FIELDS)
+        if len(clean_text) < expected_len:
+            print(f"  ✗ Only {len(clean_text)}/{expected_len} digits read — likely mid-transition")
             return None
 
-        raw_digits = max(matches, key=len)
-        reading = int(raw_digits)
+        reading = int(clean_text[:7])  # cap at 7 digits for safety
 
         if last_reading is not None:
             if reading < last_reading - 10:
@@ -239,7 +277,6 @@ def on_connect(client, userdata, flags, rc):
         print(f"✓ Connected to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
         client.subscribe(IMAGE_TOPIC)
         print(f"✓ Subscribed to {IMAGE_TOPIC}")
-
         discovery_config = {
             "name": METER_NAME,
             "unique_id": METER_ID,
@@ -258,16 +295,10 @@ def on_connect(client, userdata, flags, rc):
 def on_message(client, userdata, msg):
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     print(f"\n[{timestamp}] Image received ({len(msg.payload)} bytes)")
-
     reading = extract_meter_reading(msg.payload)
-
     if reading:
         client.publish(STATE_TOPIC, str(reading), retain=True)
-        detail = {
-            "reading": reading,
-            "timestamp": time.time(),
-            "timestamp_human": timestamp
-        }
+        detail = {"reading": reading, "timestamp": time.time(), "timestamp_human": timestamp}
         client.publish(READING_TOPIC, json.dumps(detail))
         print(f"  ✓ Published to HA: {reading} {METER_UNIT}")
     else:

@@ -50,15 +50,14 @@ services:
       - CONFIG_TOPIC=homeassistant/sensor/gas_meter/config
       - METER_NAME=Gas Meter Reading
       - METER_ID=gas_meter_reading
-      # --- Vertical crop (% of image height) — shared by both fields ---
+      # --- Vertical crop (% of image height) — shared by all digit fields ---
       - CROP_TOP_PCT=42
       - CROP_BOTTOM_PCT=60
-      # --- Field 1: integer digits (red box on /image/raw) ---
-      - FIELD1_LEFT_PCT=5
-      - FIELD1_RIGHT_PCT=50
-      # --- Field 2: decimal digits (blue box on /image/raw) ---
-      - FIELD2_LEFT_PCT=53
-      - FIELD2_RIGHT_PCT=68
+      # --- One box per digit roller (% of image width, L:R pairs) ---
+      # Check /image/raw to see the numbered boxes; tune until each covers one roller face.
+      # Remove the first entry from DIGIT_FIELDS to ignore the leftmost (static) digit.
+      - DIGIT_FIELDS=5:15,17:27,29:39,41:50
+      - DECIMAL_FIELDS=53:62,64:72
       # --- Pre-processing ---
       - AUTOCONTRAST_CUTOFF=2
       - METER_UNIT=m³
