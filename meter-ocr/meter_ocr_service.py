@@ -41,6 +41,9 @@ CROP_BOTTOM_PCT = float(os.getenv('CROP_BOTTOM_PCT', 62))
 
 # Pre-processing
 AUTOCONTRAST_CUTOFF = float(os.getenv('AUTOCONTRAST_CUTOFF', 2))
+# Per-digit OCR tuning
+DIGIT_SCALE          = int(os.getenv('DIGIT_SCALE', 3))       # upscale before readtext fallback
+DIGIT_CONF_THRESHOLD = float(os.getenv('DIGIT_CONF_THRESHOLD', 0.2))  # reject below this confidence
 
 
 def _parse_fields(env_var, default):
@@ -77,22 +80,63 @@ def _preprocess(region):
 
 
 def _ocr_digit(img_rgb, label):
-    """OCR a single-roller crop. Returns (digit_char, results)."""
-    results = ocr_reader.readtext(
-        np.array(img_rgb),
-        allowlist='0123456789',
-        detail=1,
-        paragraph=False,
-    )
+    """OCR a single-roller crop. Returns (digit_char, results).
+
+    Strategy 1 — bypass CRAFT text detector entirely:
+      EasyOCR's reader.recognize() feeds the crop straight to the CRNN
+      recognizer using the whole image as the bounding box.  CRAFT is the
+      part that fails on blurry isolated digits; the recognizer handles them fine.
+
+    Strategy 2 (fallback) — readtext with upscaling:
+      If recognize() raises or returns nothing, upscale the crop so CRAFT
+      has more pixels to work with, then lower the detection thresholds.
+    """
+    img_np   = np.array(img_rgb)
+    h, w     = img_np.shape[:2]
+    img_gray = np.array(img_rgb.convert('L'))
+
+    results = None
+
+    # --- Strategy 1: bypass CRAFT, feed whole image to CRNN ---
+    try:
+        results = ocr_reader.recognize(
+            img_gray,
+            horizontal_list=[[0, w, 0, h]],
+            free_list=[],
+            allowlist='0123456789',
+            detail=1,
+        )
+    except Exception as e:
+        print(f"  {label}: recognize() unavailable ({e}), using readtext fallback")
+
+    # --- Strategy 2: readtext with upscaling ---
+    if not results:
+        scaled = img_rgb.resize((w * DIGIT_SCALE, h * DIGIT_SCALE), Image.LANCZOS) \
+                 if DIGIT_SCALE > 1 else img_rgb
+        results = ocr_reader.readtext(
+            np.array(scaled),
+            allowlist='0123456789',
+            detail=1,
+            paragraph=False,
+            text_threshold=0.4,
+            low_text=0.2,
+            link_threshold=0.3,
+        )
+
     if not results:
         print(f"  {label}: - (nothing detected)")
         return '', []
-    # Take the highest-confidence detection and use its first digit
+
     best_bbox, best_txt, best_conf = max(results, key=lambda r: r[2])
+
+    if best_conf < DIGIT_CONF_THRESHOLD:
+        print(f"  {label}: - (conf={best_conf:.2f} below threshold)")
+        return '', []
+
     digit = re.sub(r'[^0-9]', '', best_txt)
     digit = digit[0] if digit else ''
     print(f"  {label}: '{digit}' (conf={best_conf:.2f})")
-    return digit, results
+    return digit, [(best_bbox, best_txt, best_conf)]
 
 
 def annotate_raw_with_crop(raw_bytes):
