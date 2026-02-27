@@ -31,38 +31,68 @@ last_reading = None
 reading_history = []
 last_image_raw = None
 last_image_processed = None
+last_image_annotated = None
 
 HTTP_PORT = int(os.getenv('HTTP_PORT', 8080))
 
-# --- Crop (% of image dimensions) ---
-# View /image/raw for the red box; adjust until it covers only the digit faces.
+# --- Vertical crop (% of image height) — shared by both fields ---
 CROP_TOP_PCT    = float(os.getenv('CROP_TOP_PCT',    40))
 CROP_BOTTOM_PCT = float(os.getenv('CROP_BOTTOM_PCT', 62))
-CROP_LEFT_PCT   = float(os.getenv('CROP_LEFT_PCT',    0))
-CROP_RIGHT_PCT  = float(os.getenv('CROP_RIGHT_PCT',  82))
+
+# --- Two detection fields (% of image width) ---
+# Field 1 (red box):  integer digits, left of the decimal separator
+# Field 2 (blue box): decimal digits, right of the decimal separator
+# Set FIELD2_RIGHT_PCT <= FIELD2_LEFT_PCT to disable field 2 (single-field mode)
+FIELD1_LEFT_PCT  = float(os.getenv('FIELD1_LEFT_PCT',   0))
+FIELD1_RIGHT_PCT = float(os.getenv('FIELD1_RIGHT_PCT', 50))
+FIELD2_LEFT_PCT  = float(os.getenv('FIELD2_LEFT_PCT',  52))
+FIELD2_RIGHT_PCT = float(os.getenv('FIELD2_RIGHT_PCT', 82))
 
 # --- Pre-processing ---
 AUTOCONTRAST_CUTOFF = float(os.getenv('AUTOCONTRAST_CUTOFF', 2))
 
-# Initialise EasyOCR once — loading the model takes a few seconds
 print("Loading EasyOCR model...")
 ocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
 print("✓ EasyOCR ready")
 
 
+def _preprocess(region):
+    gray = ImageOps.autocontrast(region.convert('L'), cutoff=AUTOCONTRAST_CUTOFF)
+    return gray.convert('RGB')
+
+
 def annotate_raw_with_crop(raw_bytes):
-    """Return the raw image with the active crop region drawn as a red rectangle."""
+    """Return raw image with field regions as coloured rectangles (red=field1, blue=field2)."""
     img = Image.open(io.BytesIO(raw_bytes))
-    h = img.height
+    h, w = img.height, img.width
     top    = int(h * CROP_TOP_PCT    / 100)
     bottom = int(h * CROP_BOTTOM_PCT / 100)
-    left   = int(img.width * CROP_LEFT_PCT   / 100)
-    right  = int(img.width * CROP_RIGHT_PCT  / 100)
+    f1l = int(w * FIELD1_LEFT_PCT  / 100)
+    f1r = int(w * FIELD1_RIGHT_PCT / 100)
+    f2l = int(w * FIELD2_LEFT_PCT  / 100)
+    f2r = int(w * FIELD2_RIGHT_PCT / 100)
     draw = ImageDraw.Draw(img)
-    draw.rectangle([(left, top), (right, bottom)], outline='red', width=3)
+    draw.rectangle([(f1l, top), (f1r, bottom)], outline='red',  width=3)
+    if f2r > f2l:
+        draw.rectangle([(f2l, top), (f2r, bottom)], outline='blue', width=3)
     buf = io.BytesIO()
     img.save(buf, format='JPEG')
     return buf.getvalue()
+
+
+def _ocr_field(img_rgb, label):
+    """Run EasyOCR on a preprocessed PIL image. Returns (digit_str, raw_results)."""
+    results = ocr_reader.readtext(
+        np.array(img_rgb),
+        allowlist='0123456789',
+        detail=1,
+        paragraph=False,
+    )
+    results.sort(key=lambda r: r[0][0][0])
+    for bbox, txt, conf in results:
+        print(f"  {label}: '{txt}' (conf={conf:.2f}, x={int(bbox[0][0])})")
+    digits = re.sub(r'[^0-9]', '', ''.join(txt for _, txt, _ in results))
+    return digits, results
 
 
 class ImageHandler(BaseHTTPRequestHandler):
@@ -72,6 +102,8 @@ class ImageHandler(BaseHTTPRequestHandler):
             self._serve_image(data)
         elif self.path in ('/image', '/image/processed'):
             self._serve_image(last_image_processed)
+        elif self.path == '/image/annotated':
+            self._serve_image(last_image_annotated)
         elif self.path == '/':
             self._serve_status()
         else:
@@ -93,7 +125,11 @@ class ImageHandler(BaseHTTPRequestHandler):
         body = f"""<html><body>
 <h2>{METER_NAME}</h2>
 <p>Last reading: {last_reading} {METER_UNIT if last_reading else 'N/A'}</p>
-<p><a href="/image/raw">Raw image (with crop box)</a> &nbsp; <a href="/image/processed">Cropped image sent to OCR</a></p>
+<p>
+  <a href="/image/raw">Raw image (field boxes: red=integers, blue=decimals)</a><br>
+  <a href="/image/processed">Processed fields (what EasyOCR receives)</a><br>
+  <a href="/image/annotated">Annotated detections (red=field1, blue=field2)</a>
+</p>
 </body></html>""".encode()
         self.send_response(200)
         self.send_header('Content-Type', 'text/html')
@@ -112,76 +148,86 @@ def start_http_server():
 
 
 def extract_meter_reading(image_data):
-    """Extract meter reading from image using EasyOCR."""
-    global last_image_raw, last_image_processed
+    global last_image_raw, last_image_processed, last_image_annotated, last_reading
     try:
         last_image_raw = image_data
-
-        # Load and crop to the digit strip (keep colour — EasyOCR handles it natively)
         image = Image.open(io.BytesIO(image_data))
         h, w = image.height, image.width
-        cropped = image.crop((int(w * CROP_LEFT_PCT   / 100), int(h * CROP_TOP_PCT    / 100),
-                              int(w * CROP_RIGHT_PCT  / 100), int(h * CROP_BOTTOM_PCT / 100)))
 
-        # Light contrast normalisation helps on very dark/bright images
-        cropped_gray = ImageOps.autocontrast(cropped.convert('L'), cutoff=AUTOCONTRAST_CUTOFF)
-        cropped = cropped_gray.convert('RGB')
+        top    = int(h * CROP_TOP_PCT    / 100)
+        bottom = int(h * CROP_BOTTOM_PCT / 100)
+        f1l = int(w * FIELD1_LEFT_PCT  / 100)
+        f1r = int(w * FIELD1_RIGHT_PCT / 100)
+        f2l = int(w * FIELD2_LEFT_PCT  / 100)
+        f2r = int(w * FIELD2_RIGHT_PCT / 100)
 
-        # Save cropped image so /image/processed shows exactly what EasyOCR receives
+        use_field2 = f2r > f2l
+
+        field1 = _preprocess(image.crop((f1l, top, f1r, bottom)))
+        field2 = _preprocess(image.crop((f2l, top, f2r, bottom))) if use_field2 else None
+
+        # --- Combined processed image (field1 | grey gap | field2) ---
+        GAP = 8
+        f1w = f1r - f1l
+        f2w = (f2r - f2l) if use_field2 else 0
+        combined_w = f1w + (GAP + f2w if use_field2 else 0)
+        combined_h = bottom - top
+        combined = Image.new('RGB', (combined_w, combined_h), color=(160, 160, 160))
+        combined.paste(field1, (0, 0))
+        if use_field2:
+            combined.paste(field2, (f1w + GAP, 0))
         buf = io.BytesIO()
-        cropped.save(buf, format='JPEG')
+        combined.save(buf, format='JPEG')
         last_image_processed = buf.getvalue()
 
-        # Run EasyOCR — allowlist restricts recognition to digits only
-        # detail=1 gives bounding boxes so we can sort left-to-right
-        results = ocr_reader.readtext(
-            np.array(cropped),
-            allowlist='0123456789',
-            detail=1,
-            paragraph=False,
-        )
-        # Sort detections left-to-right by the x-coordinate of the top-left corner
-        results.sort(key=lambda r: r[0][0][0])
+        # --- OCR each field independently ---
+        digits1, det1 = _ocr_field(field1, 'Field1')
+        digits2, det2 = _ocr_field(field2, 'Field2') if use_field2 else ('', [])
+        clean_text = digits1 + digits2
+        print(f"  Field1='{digits1}' Field2='{digits2}' Combined='{clean_text}'")
 
-        for bbox, txt, conf in results:
-            print(f"  EasyOCR: '{txt}' (conf={conf:.2f}, x={int(bbox[0][0])})")
+        # --- Annotated image with bounding boxes ---
+        annotated = combined.copy()
+        draw = ImageDraw.Draw(annotated)
+        for bbox, txt, conf in det1:
+            x0, y0 = int(bbox[0][0]), int(bbox[0][1])
+            x1, y1 = int(bbox[2][0]), int(bbox[2][1])
+            draw.rectangle([(x0, y0), (x1, y1)], outline='red', width=2)
+            draw.text((x0 + 2, y0 + 2), txt, fill='red')
+        if use_field2:
+            offset_x = f1w + GAP
+            for bbox, txt, conf in det2:
+                x0, y0 = int(bbox[0][0]) + offset_x, int(bbox[0][1])
+                x1, y1 = int(bbox[2][0]) + offset_x, int(bbox[2][1])
+                draw.rectangle([(x0, y0), (x1, y1)], outline='blue', width=2)
+                draw.text((x0 + 2, y0 + 2), txt, fill='blue')
+        buf = io.BytesIO()
+        annotated.save(buf, format='JPEG')
+        last_image_annotated = buf.getvalue()
 
-        text = ''.join(txt for _, txt, _ in results)
-        clean_text = re.sub(r'[^0-9]', '', text)
-        print(f"  Joined: '{clean_text}'")
-
-        # Accept 4–7 digits: meter shows ~4 integer digits + optional decimal digits
+        # --- Validate and sanity-check the reading ---
         matches = re.findall(r'\d{4,7}', clean_text)
-
-        if matches:
-            # Take the longest match (most complete reading)
-            raw_digits = max(matches, key=len)
-            reading = int(raw_digits)
-
-            global last_reading
-            if last_reading is not None:
-                if reading < last_reading - 10:
-                    print(f"  ⚠ Reading decreased suspiciously: {last_reading} -> {reading}, skipping")
-                    return None
-                elif reading > last_reading + 1000:
-                    print(f"  ⚠ Reading increased suspiciously: {last_reading} -> {reading}, skipping")
-                    return None
-
-            print(f"  ✓ Reading extracted: {reading} {METER_UNIT}")
-            last_reading = reading
-
-            reading_history.append({
-                'reading': reading,
-                'timestamp': time.time(),
-                'raw_text': text,
-            })
-            if len(reading_history) > 100:
-                reading_history.pop(0)
-
-            return reading
-        else:
-            print(f"  ✗ No valid 4-7 digit reading found")
+        if not matches:
+            print(f"  ✗ No valid 4-7 digit reading found in '{clean_text}'")
             return None
+
+        raw_digits = max(matches, key=len)
+        reading = int(raw_digits)
+
+        if last_reading is not None:
+            if reading < last_reading - 10:
+                print(f"  ⚠ Reading decreased suspiciously: {last_reading} -> {reading}, skipping")
+                return None
+            elif reading > last_reading + 1000:
+                print(f"  ⚠ Reading increased suspiciously: {last_reading} -> {reading}, skipping")
+                return None
+
+        print(f"  ✓ Reading extracted: {reading} {METER_UNIT}")
+        last_reading = reading
+        reading_history.append({'reading': reading, 'timestamp': time.time(), 'raw_text': clean_text})
+        if len(reading_history) > 100:
+            reading_history.pop(0)
+        return reading
 
     except Exception as e:
         print(f"  ✗ OCR error: {e}")
