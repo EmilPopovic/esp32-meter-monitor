@@ -129,10 +129,16 @@ def extract_meter_reading(image_data):
         image = image.resize((image.width * 3, image.height * 3), Image.LANCZOS)
         image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
 
-        # Binarize — converts blurry gray edges to crisp black/white,
-        # eliminating camera blur artifacts that trip up Tesseract.
-        # Background is ~255 (white) after invert; digits are dark.
-        image = image.point(lambda x: 255 if x > 160 else 0)
+        # Adaptive threshold — computes a local threshold per region so that
+        # uneven lighting (bright left, dark right) doesn't kill digits.
+        # GaussianBlur gives the local mean; pixels darker than (mean - offset)
+        # are digits (black), everything else is background (white).
+        local_mean = image.filter(ImageFilter.GaussianBlur(radius=40))
+        img_px   = list(image.getdata())
+        mean_px  = list(local_mean.getdata())
+        binary   = [0 if p < m - 20 else 255 for p, m in zip(img_px, mean_px)]
+        image = Image.new('L', image.size)
+        image.putdata(binary)
 
         # White border — Tesseract expects some padding around text
         image = ImageOps.expand(image, border=20, fill=255)
