@@ -79,6 +79,37 @@ def start_http_server():
     print(f"✓ Image viewer running on port {HTTP_PORT}")
     server.serve_forever()
 
+def crop_to_digit_strip(image):
+    """Crop to the dark odometer band by finding the darkest horizontal region."""
+    width, height = image.size
+    pixels = list(image.getdata())
+
+    row_means = [sum(pixels[y * width:(y + 1) * width]) / width for y in range(height)]
+    overall_mean = sum(row_means) / height
+    dark_thresh = overall_mean * 0.55
+
+    best_start = best_end = cur_start = 0
+    in_band = False
+    for y, m in enumerate(row_means):
+        if m < dark_thresh:
+            if not in_band:
+                cur_start = y
+                in_band = True
+        else:
+            if in_band:
+                if (y - cur_start) > (best_end - best_start):
+                    best_start, best_end = cur_start, y
+                in_band = False
+    if in_band and (height - cur_start) > (best_end - best_start):
+        best_start, best_end = cur_start, height
+
+    if best_end == best_start:
+        return image  # couldn't detect strip, fall back to full image
+
+    pad = max(5, (best_end - best_start) // 3)
+    return image.crop((0, max(0, best_start - pad), width, min(height, best_end + pad)))
+
+
 def extract_meter_reading(image_data):
     """Extract 7-digit meter reading from image"""
     global last_image_raw, last_image_processed
@@ -92,11 +123,17 @@ def extract_meter_reading(image_data):
         # Convert to grayscale
         image = image.convert('L')
 
-        # Normalize brightness/contrast regardless of how dark the image is
+        # Normalize brightness/contrast
         image = ImageOps.autocontrast(image, cutoff=2)
 
-        # Scale up before OCR — Tesseract accuracy drops sharply on small text.
-        # Sharpen after scaling so edges are crisp at the enlarged size.
+        # Crop to the dark digit strip — removes all the surrounding text that
+        # confuses PSM 7 (KOM Zagreb, Plinomjer G4R, etc.)
+        image = crop_to_digit_strip(image)
+
+        # Invert: digits are white-on-dark; Tesseract prefers dark-on-light
+        image = ImageOps.invert(image)
+
+        # Scale up then sharpen — Tesseract accuracy drops sharply on small text
         image = image.resize((image.width * 3, image.height * 3), Image.LANCZOS)
         image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
 
