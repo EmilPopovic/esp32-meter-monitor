@@ -37,11 +37,32 @@ last_image_processed = None
 
 HTTP_PORT = int(os.getenv('HTTP_PORT', 8080))
 
-# Static crop: percentage of image dimensions to keep.
-# View /image/raw to see the red crop box; adjust until it covers only the digits.
+# --- Crop (% of image dimensions) ---
+# View /image/raw for the red box; adjust until it covers only the digit faces.
 CROP_TOP_PCT    = float(os.getenv('CROP_TOP_PCT',    40))
 CROP_BOTTOM_PCT = float(os.getenv('CROP_BOTTOM_PCT', 62))
-CROP_RIGHT_PCT  = float(os.getenv('CROP_RIGHT_PCT',  82))  # trims "m³" from right edge
+CROP_LEFT_PCT   = float(os.getenv('CROP_LEFT_PCT',    0))
+CROP_RIGHT_PCT  = float(os.getenv('CROP_RIGHT_PCT',  82))
+
+# --- Pre-processing ---
+AUTOCONTRAST_CUTOFF = float(os.getenv('AUTOCONTRAST_CUTOFF', 2))   # % to clip at each end
+SCALE_FACTOR        = int(os.getenv('SCALE_FACTOR',           3))   # upscale before OCR
+SHARPEN_RADIUS      = float(os.getenv('SHARPEN_RADIUS',       2))   # unsharp mask radius
+SHARPEN_PERCENT     = int(os.getenv('SHARPEN_PERCENT',       150))  # unsharp mask strength
+
+# --- Adaptive threshold ---
+# GaussianBlur radius sets the neighbourhood size; offset is how much darker than
+# the local mean a pixel must be to count as a digit stroke.
+ADAPTIVE_RADIUS = int(os.getenv('ADAPTIVE_RADIUS', 40))
+ADAPTIVE_OFFSET = int(os.getenv('ADAPTIVE_OFFSET', 20))
+
+# --- Frame bar removal ---
+# Rows where more than this fraction of pixels are black after thresholding are
+# treated as border/frame and blanked out (set to white).
+FRAME_ROW_THRESHOLD = float(os.getenv('FRAME_ROW_THRESHOLD', 0.80))
+
+# --- Padding added around the final image before Tesseract ---
+BORDER_SIZE = int(os.getenv('BORDER_SIZE', 20))
 
 def annotate_raw_with_crop(raw_bytes):
     """Return the raw image with the active crop region drawn as a red rectangle."""
@@ -50,8 +71,9 @@ def annotate_raw_with_crop(raw_bytes):
     top    = int(h * CROP_TOP_PCT    / 100)
     bottom = int(h * CROP_BOTTOM_PCT / 100)
     draw = ImageDraw.Draw(img)
+    left   = int(img.width * CROP_LEFT_PCT   / 100)
     right  = int(img.width * CROP_RIGHT_PCT  / 100)
-    draw.rectangle([(0, top), (right, bottom)], outline='red', width=3)
+    draw.rectangle([(left, top), (right, bottom)], outline='red', width=3)
     buf = io.BytesIO()
     img.save(buf, format='JPEG')
     return buf.getvalue()
@@ -114,34 +136,41 @@ def extract_meter_reading(image_data):
         image = image.convert('L')
 
         # Normalize brightness/contrast
-        image = ImageOps.autocontrast(image, cutoff=2)
+        image = ImageOps.autocontrast(image, cutoff=AUTOCONTRAST_CUTOFF)
 
-        # Static crop to the digit strip — tune percentages in compose.yaml
-        # until the red box on /image/raw covers only the digits.
+        # Static crop — tune percentages in compose.yaml
         h, w = image.height, image.width
-        image = image.crop((0, int(h * CROP_TOP_PCT / 100),
-                            int(w * CROP_RIGHT_PCT / 100), int(h * CROP_BOTTOM_PCT / 100)))
+        image = image.crop((int(w * CROP_LEFT_PCT   / 100), int(h * CROP_TOP_PCT    / 100),
+                            int(w * CROP_RIGHT_PCT  / 100), int(h * CROP_BOTTOM_PCT / 100)))
 
         # Invert: digits are white-on-dark; Tesseract prefers dark-on-light
         image = ImageOps.invert(image)
 
-        # Scale up then sharpen — Tesseract accuracy drops sharply on small text
-        image = image.resize((image.width * 3, image.height * 3), Image.LANCZOS)
-        image = image.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+        # Scale up then sharpen
+        image = image.resize((image.width * SCALE_FACTOR, image.height * SCALE_FACTOR), Image.LANCZOS)
+        image = image.filter(ImageFilter.UnsharpMask(radius=SHARPEN_RADIUS, percent=SHARPEN_PERCENT, threshold=3))
 
-        # Adaptive threshold — computes a local threshold per region so that
-        # uneven lighting (bright left, dark right) doesn't kill digits.
-        # GaussianBlur gives the local mean; pixels darker than (mean - offset)
-        # are digits (black), everything else is background (white).
-        local_mean = image.filter(ImageFilter.GaussianBlur(radius=40))
-        img_px   = list(image.getdata())
-        mean_px  = list(local_mean.getdata())
-        binary   = [0 if p < m - 20 else 255 for p, m in zip(img_px, mean_px)]
+        # Adaptive threshold — local mean per region handles uneven lighting
+        local_mean = image.filter(ImageFilter.GaussianBlur(radius=ADAPTIVE_RADIUS))
+        img_px  = list(image.getdata())
+        mean_px = list(local_mean.getdata())
+        binary  = [0 if p < m - ADAPTIVE_OFFSET else 255 for p, m in zip(img_px, mean_px)]
         image = Image.new('L', image.size)
         image.putdata(binary)
 
-        # White border — Tesseract expects some padding around text
-        image = ImageOps.expand(image, border=20, fill=255)
+        # Remove frame bars — rows that are >FRAME_ROW_THRESHOLD black are metal
+        # border (not digits) and get blanked to white
+        cw = image.width
+        px = list(image.getdata())
+        for y in range(image.height):
+            row = px[y * cw:(y + 1) * cw]
+            if sum(1 for p in row if p == 0) / cw > FRAME_ROW_THRESHOLD:
+                for x in range(cw):
+                    px[y * cw + x] = 255
+        image.putdata(px)
+
+        # Padding — Tesseract works better with whitespace around text
+        image = ImageOps.expand(image, border=BORDER_SIZE, fill=255)
 
         # Save processed image for debugging
         buf = io.BytesIO()
